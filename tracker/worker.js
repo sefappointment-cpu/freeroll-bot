@@ -148,6 +148,40 @@ export default {
       });
     }
 
+    // Прокси для бота: забирает страницу расписания с freerollpass.com
+    // (серверы GitHub сайт блокирует, а запросы из сети Cloudflare пропускает)
+    if (url.pathname === "/feed") {
+      if (!env.STATS_KEY || url.searchParams.get("key") !== env.STATS_KEY) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const page = Math.min(20, Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1));
+      const body =
+        "Filter[pass][]=all&Filter[deposit][]=all&Filter[satellite][]=all" +
+        "&Filter[exclusive_fr][]=all&Filter[type][]=all" +
+        (page > 1 ? `&Filter[page]=${page}` : "");
+      const upstream = await fetch("https://freerollpass.com/", {
+        method: "POST",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+          Accept: "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "X-Requested-With": "XMLHttpRequest",
+          "X-WINTER-REQUEST-HANDLER": "onFilterFreerolls",
+          "X-WINTER-REQUEST-PARTIALS": "freerollList&loadmore&timeAjax",
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          Origin: "https://freerollpass.com",
+          Referer: "https://freerollpass.com/",
+          Cookie: "tz_auto=Europe%2FLisbon; hc_format=24",
+        },
+        body,
+      });
+      return new Response(await upstream.text(), {
+        status: upstream.status,
+        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
+
     if (url.pathname === "/stats") {
       if (!env.STATS_KEY || url.searchParams.get("key") !== env.STATS_KEY) {
         return new Response("Forbidden", { status: 403 });
@@ -156,5 +190,8 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
+  },
+};
+
   },
 };
