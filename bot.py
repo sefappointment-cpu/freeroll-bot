@@ -72,7 +72,10 @@ def fetch_pages_via_worker() -> list[str]:
         if r.status_code == 403 and page == 1 and r.text.strip() == "Forbidden":
             raise RuntimeError("Сервис /feed не принял пароль: проверьте секрет STATS_KEY.")
         if r.status_code != 200:
-            raise RuntimeError(f"Сайт через сервис ответил {r.status_code}: {r.text[:200]}")
+            colo = r.headers.get("x-feed-colo", "?")
+            raise RuntimeError(
+                f"Сайт через сервис ответил {r.status_code} (дата-центр Cloudflare: {colo}): {r.text[:120]}"
+            )
         data = r.json()
         if page == 1:
             print("Источник: через сервис " + TRACKER_URL)
