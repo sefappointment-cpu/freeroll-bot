@@ -1,0 +1,25 @@
+name: Deploy click tracker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tracker/**"
+      - "rooms.json"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: tracker
+          secrets: |
+            STATS_KEY
+        env:
+          STATS_KEY: ${{ secrets.STATS_KEY }}
