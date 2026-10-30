@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as cffi_requests
 
 BASE = "https://freerollpass.com/"
 TZ_NAME = os.getenv("TZ_NAME", "Europe/Lisbon")
@@ -40,11 +41,8 @@ FILTER = (
     "Filter[pass][]=all&Filter[deposit][]=all&Filter[satellite][]=all"
     "&Filter[exclusive_fr][]=all&Filter[type][]=all"
 )
+# User-Agent и прочие «браузерные» заголовки подставляет curl_cffi (impersonate)
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
-    ),
     "Accept": "*/*",
     "X-Requested-With": "XMLHttpRequest",
     "X-WINTER-REQUEST-HANDLER": "onFilterFreerolls",
@@ -60,15 +58,23 @@ NO_PASS_MARKERS = ("not required", "не требуется")
 # ---------------------------------------------------------------- fetching
 
 def fetch_pages() -> list[str]:
-    s = requests.Session()
+    # Сайт за Cloudflare: обычный python-requests получает 403, поэтому
+    # притворяемся браузером Chrome (TLS-отпечаток + заголовки).
+    s = cffi_requests.Session(impersonate="chrome")
     s.cookies.set("tz_auto", TZ_NAME, domain="freerollpass.com")
     s.cookies.set("hc_format", "24", domain="freerollpass.com")
-    s.get(BASE, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
+    r = s.get(BASE, timeout=30)
+    print(f"Главная страница: статус {r.status_code}")
+    if r.status_code == 403:
+        raise RuntimeError("Сайт отказал в доступе (403): защита Cloudflare блокирует этот сервер.")
+    time.sleep(1)
 
     chunks = []
     for page in range(1, MAX_PAGES + 1):
         body = FILTER + (f"&Filter[page]={page}" if page > 1 else "")
         r = s.post(BASE, headers=HEADERS, data=body, timeout=30)
+        if r.status_code == 403:
+            raise RuntimeError("Сайт отказал в доступе (403) на запросе списка.")
         r.raise_for_status()
         try:
             data = r.json()
