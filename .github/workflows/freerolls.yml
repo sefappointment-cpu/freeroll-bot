@@ -31,6 +31,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
           TRACKER_URL: ${{ vars.TRACKER_URL }}
+          FEED_KEY: ${{ secrets.STATS_KEY }}
           POST_AHEAD_MINUTES: "30"
           SKIP_DEPOSIT_ONLY: "0"
         run: python bot.py
