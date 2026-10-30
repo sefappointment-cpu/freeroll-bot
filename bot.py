@@ -31,6 +31,7 @@ SKIP_DEPOSIT_ONLY = os.getenv("SKIP_DEPOSIT_ONLY", "0") == "1"
 
 # Сервис учёта переходов (tracker/), например https://freeroll-go.<имя>.workers.dev
 TRACKER_URL = os.getenv("TRACKER_URL", "").rstrip("/")
+FEED_KEY = os.getenv("FEED_KEY", "")  # = STATS_KEY; если задан, расписание берётся через сервис
 _rooms_file = Path(__file__).with_name("rooms.json")
 ROOMS = json.loads(_rooms_file.read_text(encoding="utf-8")) if _rooms_file.exists() else {}
 
@@ -58,6 +59,33 @@ NO_PASS_MARKERS = ("not required", "не требуется")
 # ---------------------------------------------------------------- fetching
 
 def fetch_pages() -> list[str]:
+    if TRACKER_URL and FEED_KEY:
+        return fetch_pages_via_worker()
+    return fetch_pages_direct()
+
+
+def fetch_pages_via_worker() -> list[str]:
+    """Расписание через свой сервис на Cloudflare (/feed): серверы GitHub сайт блокирует."""
+    chunks = []
+    for page in range(1, MAX_PAGES + 1):
+        r = requests.get(f"{TRACKER_URL}/feed", params={"key": FEED_KEY, "page": page}, timeout=60)
+        if r.status_code == 403 and page == 1 and r.text.strip() == "Forbidden":
+            raise RuntimeError("Сервис /feed не принял пароль: проверьте секрет STATS_KEY.")
+        if r.status_code != 200:
+            raise RuntimeError(f"Сайт через сервис ответил {r.status_code}: {r.text[:200]}")
+        data = r.json()
+        if page == 1:
+            print("Источник: через сервис " + TRACKER_URL)
+            tz_label = BeautifulSoup(data.get("timeAjax", ""), "html.parser").get_text(" ", strip=True)
+            print(f"Часовой пояс на сайте: {tz_label or '?'}")
+        chunks.append(data.get("freerollList", ""))
+        if "loadNextPage" not in data.get("loadmore", ""):
+            break
+        time.sleep(1.5)
+    return chunks
+
+
+def fetch_pages_direct() -> list[str]:
     # Сайт за Cloudflare: обычный python-requests получает 403, поэтому
     # притворяемся браузером Chrome (TLS-отпечаток + заголовки).
     s = cffi_requests.Session(impersonate="chrome")
