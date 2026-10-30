@@ -127,6 +127,52 @@ ${table("Лучшие посты", ["Рум", "Турнир"], posts.map((r) => 
   return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 }
 
+// ---------------------------------------------------------------- feed (EU)
+
+async function myColo() {
+  try {
+    const t = await (await fetch("https://www.cloudflare.com/cdn-cgi/trace")).text();
+    return (t.match(/colo=(\w+)/) || [])[1] || "?";
+  } catch {
+    return "?";
+  }
+}
+
+export class FeedFetcher {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async fetch(req) {
+    const page = Number(new URL(typeof req === "string" ? req : req.url).searchParams.get("page") || 1);
+    const body =
+      "Filter[pass][]=all&Filter[deposit][]=all&Filter[satellite][]=all" +
+      "&Filter[exclusive_fr][]=all&Filter[type][]=all" +
+      (page > 1 ? `&Filter[page]=${page}` : "");
+    const upstream = await fetch("https://freerollpass.com/", {
+      method: "POST",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        Accept: "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-WINTER-REQUEST-HANDLER": "onFilterFreerolls",
+        "X-WINTER-REQUEST-PARTIALS": "freerollList&loadmore&timeAjax",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        Origin: "https://freerollpass.com",
+        Referer: "https://freerollpass.com/",
+        Cookie: "tz_auto=Europe%2FLisbon; hc_format=24",
+      },
+      body,
+    });
+    const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
+    if (upstream.status !== 200) headers["x-feed-colo"] = await myColo();
+    return new Response(await upstream.text(), { status: upstream.status, headers });
+  }
+}
+
 // ---------------------------------------------------------------- router
 
 export default {
@@ -148,38 +194,16 @@ export default {
       });
     }
 
-    // Прокси для бота: забирает страницу расписания с freerollpass.com
-    // (серверы GitHub сайт блокирует, а запросы из сети Cloudflare пропускает)
+    // Прокси для бота: забирает страницу расписания с freerollpass.com.
+    // Запрос делает объект, закреплённый в Западной Европе: из США сайт
+    // отвечает проверкой «Just a moment...», а из Европы пропускает.
     if (url.pathname === "/feed") {
       if (!env.STATS_KEY || url.searchParams.get("key") !== env.STATS_KEY) {
         return new Response("Forbidden", { status: 403 });
       }
       const page = Math.min(20, Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1));
-      const body =
-        "Filter[pass][]=all&Filter[deposit][]=all&Filter[satellite][]=all" +
-        "&Filter[exclusive_fr][]=all&Filter[type][]=all" +
-        (page > 1 ? `&Filter[page]=${page}` : "");
-      const upstream = await fetch("https://freerollpass.com/", {
-        method: "POST",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
-          Accept: "*/*",
-          "Accept-Language": "en-US,en;q=0.9",
-          "X-Requested-With": "XMLHttpRequest",
-          "X-WINTER-REQUEST-HANDLER": "onFilterFreerolls",
-          "X-WINTER-REQUEST-PARTIALS": "freerollList&loadmore&timeAjax",
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          Origin: "https://freerollpass.com",
-          Referer: "https://freerollpass.com/",
-          Cookie: "tz_auto=Europe%2FLisbon; hc_format=24",
-        },
-        body,
-      });
-      return new Response(await upstream.text(), {
-        status: upstream.status,
-        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-      });
+      const stub = env.FEED.get(env.FEED.idFromName("weur-1"), { locationHint: "weur" });
+      return stub.fetch(`https://feed.internal/?page=${page}`);
     }
 
     if (url.pathname === "/stats") {
@@ -192,4 +216,3 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
-

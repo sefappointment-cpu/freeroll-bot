@@ -6,3 +6,12 @@ compatibility_date = "2026-10-01"
 binding = "DB"
 database_name = "freeroll-clicks"
 database_id = "cac271e8-27e0-4f9b-80bd-3f8ee20c90bc"
+
+# Объект, который забирает расписание с сайта всегда из Западной Европы
+[[durable_objects.bindings]]
+name = "FEED"
+class_name = "FeedFetcher"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FeedFetcher"]
