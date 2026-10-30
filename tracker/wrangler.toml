@@ -1,0 +1,8 @@
+name = "freeroll-go"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "freeroll-clicks"
+database_id = "cac271e8-27e0-4f9b-80bd-3f8ee20c90bc"
