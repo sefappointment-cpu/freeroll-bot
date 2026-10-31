@@ -2,6 +2,14 @@ name = "freeroll-go"
 main = "worker.js"
 compatibility_date = "2026-10-01"
 
+[vars]
+TRACKER_URL = "https://freeroll-go.sichag.workers.dev"
+POST_AHEAD_MINUTES = "30"
+
+# Бот: проверка расписания каждые 2 минуты
+[triggers]
+crons = ["*/2 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "freeroll-clicks"

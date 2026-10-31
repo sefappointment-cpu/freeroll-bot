@@ -67,9 +67,16 @@ function flag(cc) {
   return String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
 }
 
+// создаётся только при открытии статистики, чтобы не тратить время на запусках бота
 let regionNames;
-try { regionNames = new Intl.DisplayNames(["ru"], { type: "region" }); } catch { regionNames = null; }
-const countryName = (cc) => { try { return regionNames?.of(cc) || cc; } catch { return cc; } };
+const countryName = (cc) => {
+  try {
+    if (regionNames === undefined) regionNames = new Intl.DisplayNames(["ru"], { type: "region" });
+    return regionNames.of(cc) || cc;
+  } catch {
+    return cc;
+  }
+};
 
 function table(title, head, rows, max) {
   const bar = (v) => `<div class="bar"><span style="width:${max ? Math.max(2, (v / max) * 100) : 0}%"></span></div>`;
@@ -173,9 +180,224 @@ export class FeedFetcher {
   }
 }
 
+// ---------------------------------------------------------------- bot
+// Каждые 2 минуты (cron в wrangler.toml): забрать расписание через объект в Европе,
+// найти турниры с паролем, до старта которых ≤ POST_AHEAD_MINUTES, и опубликовать.
+
+// Сайт отдаёт время по Лиссабону (cookie tz_auto в FeedFetcher), в постах — по Нью-Йорку (ET)
+const POST_TZ_LABEL = "ET";
+const MAX_PAGES = 6;
+
+async function fetchSchedule(env) {
+  const stub = env.FEED.get(env.FEED.idFromName("weur-1"), { locationHint: "weur" });
+  const chunks = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await stub.fetch(`https://feed.internal/?page=${page}`);
+    const text = await r.text();
+    if (r.status !== 200) {
+      throw new Error(`сайт ответил ${r.status} (дата-центр ${r.headers.get("x-feed-colo") || "?"}): ${text.slice(0, 80)}`);
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("сайт вернул не JSON: " + text.slice(0, 80));
+    }
+    chunks.push(data.freerollList || "");
+    if (!String(data.loadmore || "").includes("loadNextPage")) break;
+  }
+  return chunks;
+}
+
+const decode = (s) =>
+  String(s ?? "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/\s+/g, " ")
+    .trim();
+
+const pick = (re, s) => (s.match(re) || [])[1];
+
+function parseSchedule(chunk) {
+  const out = [];
+  for (const li of chunk.split(/<li\s+class="row/).slice(1)) {
+    const passM = li.match(/<div id="(\d+)" class="pt-1">([\s\S]*?)<\/div>/);
+    if (!passM) continue;
+    const [, id, passHtml] = passM;
+    const passText = decode(passHtml).toLowerCase();
+    let password = null;
+    if (!passText.includes("will be available") && !passText.includes("not required")) {
+      password = decode(pick(/fl-badge[^>]*>([\s\S]*?)<\/strong>/, passHtml)) || null;
+    }
+    const prizeHtml = pick(/c-yellow">([\s\S]*?)<\/div>/, li) || "";
+    let prize = decode(prizeHtml);
+    if (prizeHtml.includes("#bi-ticket")) prize = `${prize} tickets`;
+    out.push({
+      id,
+      time: pick(/class="f-size-30-576-40">\s*(\d{1,2}:\d{2})\s*</, li),
+      date: pick(/class="f-size-15-576-20">\s*(\d{2}\.\d{2}\.\d{4})\s*</, li),
+      reg: pick(/Registration until <span[^>]*>\s*(\d{1,2}:\d{2})/, li),
+      prize,
+      roomSlug: pick(/class="title-room"><a href="https?:\/\/freerollpass\.com\/([a-z0-9]+)"/, li) || "",
+      room: decode(pick(/class="title-room[^"]*">(?:<a [^>]*>)?\s*<div[^>]*><\/div>([^<]*)/, li)),
+      name: decode(pick(/class="fl-text-name">([\s\S]*?)<\/span>/, li)),
+      password,
+    });
+  }
+  return out;
+}
+
+// Часовые пояса считаем по правилам перехода на летнее время без Intl:
+// так запуск по расписанию укладывается в лимит процессорного времени бесплатного тарифа.
+const H = 3600000;
+// n-е (или последнее при n = -1) воскресенье месяца, в UTC-полночь
+function nthSunday(y, month, n) {
+  if (n === -1) {
+    const last = new Date(Date.UTC(y, month + 1, 0));
+    return Date.UTC(y, month, last.getUTCDate() - last.getUTCDay());
+  }
+  const first = new Date(Date.UTC(y, month, 1)).getUTCDay();
+  return Date.UTC(y, month, 1 + ((7 - first) % 7) + 7 * (n - 1));
+}
+// Лиссабон (ЕС): UTC+1 с последнего воскресенья марта 01:00 UTC до последнего воскресенья октября 01:00 UTC
+function lisbonOffset(ts) {
+  const y = new Date(ts).getUTCFullYear();
+  return ts >= nthSunday(y, 2, -1) + H && ts < nthSunday(y, 9, -1) + H ? H : 0;
+}
+// Нью-Йорк (США): EDT (UTC−4) со 2-го воскресенья марта 07:00 UTC до 1-го воскресенья ноября 06:00 UTC, иначе EST (UTC−5)
+function newYorkOffset(ts) {
+  const y = new Date(ts).getUTCFullYear();
+  return ts >= nthSunday(y, 2, 2) + 7 * H && ts < nthSunday(y, 10, 1) + 6 * H ? -4 * H : -5 * H;
+}
+
+// «31.10.2026» + «17:00» во времени сайта (Лиссабон) → миллисекунды UTC
+function siteTimeToUtc(date, time) {
+  const [d, m, y] = date.split(".").map(Number);
+  const [hh, mm] = time.split(":").map(Number);
+  const naive = Date.UTC(y, m - 1, d, hh, mm);
+  return naive - lisbonOffset(naive - lisbonOffset(naive));
+}
+
+function withTimes(t) {
+  if (!t.date || !t.time) return null;
+  const start = siteTimeToUtc(t.date, t.time);
+  let regEnd = start;
+  if (t.reg) {
+    regEnd = siteTimeToUtc(t.date, t.reg);
+    if (regEnd < start) regEnd += 86400000; // регистрация через полночь
+  }
+  return { ...t, start, regEnd };
+}
+
+const htmlEsc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function formatPost(t, env, now) {
+  const local = (ts) => new Date(ts + newYorkOffset(ts)); // «местное» время ET в полях UTC
+  const startET = local(t.start);
+  const dayKey = (d) => d.getUTCFullYear() * 10000 + d.getUTCMonth() * 100 + d.getUTCDate();
+  const day = dayKey(startET) > dayKey(local(now)) ? "TOMORROW'S" : "TODAY'S";
+  const h24 = startET.getUTCHours();
+  const when = `${h24 % 12 || 12}:${String(startET.getUTCMinutes()).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`;
+  let room = htmlEsc(t.room);
+  const base = (env.TRACKER_URL || "").replace(/\/$/, "");
+  if (room && base && ROOMS[t.roomSlug]) {
+    room = `<a href="${base}/r/${t.roomSlug}?p=${t.id}">${room}</a>`;
+  }
+  const lines = [
+    `🇺🇸 ${day} POKER FREEROLLS`,
+    `🃏 Tournament: ${room ? `${room} – ` : ""}${htmlEsc(t.name)}`,
+    `🕒 Time: ${when} ${POST_TZ_LABEL}`,
+  ];
+  if (t.prize) lines.push(`💰 Prize Pool: ${htmlEsc(t.prize)}`);
+  lines.push(`🔑 Password: <code>${htmlEsc(t.password)}</code>`, "♠️ Good luck at the tables!");
+  return lines.join("\n");
+}
+
+async function sendTelegram(env, text) {
+  const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, text, parse_mode: "HTML", disable_web_page_preview: true }),
+  });
+  if (!r.ok) throw new Error(`Telegram ${r.status}: ${(await r.text()).slice(0, 150)}`);
+}
+
+let botTablesReady = false;
+async function ensureBotTables(db) {
+  if (botTablesReady) return;
+  await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS posted (id TEXT PRIMARY KEY, start INTEGER, password TEXT, ts INTEGER)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)"),
+  ]);
+  botTablesReady = true;
+}
+
+async function runBot(env, { dryRun = false } = {}) {
+  const log = [];
+  const now = Date.now();
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHANNEL) throw new Error("не заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHANNEL");
+  await ensureBotTables(env.DB);
+
+  const all = (await fetchSchedule(env)).flatMap(parseSchedule).map(withTimes).filter(Boolean);
+  const ahead = Number(env.POST_AHEAD_MINUTES || 30) * 60000;
+  const due = all
+    .filter((t) => t.password && t.regEnd > now && t.start - now <= ahead)
+    .sort((a, b) => a.start - b.start);
+  log.push(`турниров на сайте: ${all.length}, с паролем: ${all.filter((t) => t.password).length}, подходят по времени: ${due.length}`);
+
+  let posted = 0;
+  for (const t of due) {
+    if (dryRun) {
+      const seen = await env.DB.prepare("SELECT 1 FROM posted WHERE id = ?").bind(t.id).first();
+      log.push(`${seen ? "уже было" : "опубликовал бы"}: ${t.room} – ${t.name} (${t.date} ${t.time}) пароль ${t.password}`);
+      continue;
+    }
+    // «бронируем» турнир до отправки, чтобы два запуска подряд не опубликовали его дважды
+    const claim = await env.DB.prepare("INSERT OR IGNORE INTO posted (id, start, password, ts) VALUES (?, ?, ?, ?)")
+      .bind(t.id, t.start, t.password, now).run();
+    if (!claim.meta?.changes) continue;
+    try {
+      await sendTelegram(env, formatPost(t, env, now));
+      posted++;
+      log.push(`опубликовано: ${t.room} – ${t.name} (${t.date} ${t.time})`);
+    } catch (e) {
+      await env.DB.prepare("DELETE FROM posted WHERE id = ?").bind(t.id).run();
+      log.push(`ошибка публикации ${t.id}: ${e.message}`);
+    }
+  }
+
+  if (!dryRun) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM posted WHERE start < ?").bind(now - 7 * 86400000),
+      env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('last_run', ?)")
+        .bind(JSON.stringify({ at: new Date(now).toISOString(), posted, log })),
+    ]);
+  }
+  return { posted, log };
+}
+
 // ---------------------------------------------------------------- router
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      runBot(env).catch(async (e) => {
+        console.error(e);
+        try {
+          await ensureBotTables(env.DB);
+          await env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('last_error', ?)")
+            .bind(JSON.stringify({ at: new Date().toISOString(), error: String(e.message || e) })).run();
+        } catch {}
+      })
+    );
+  },
+
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const m = url.pathname.match(/^\/r\/([a-z0-9]+)\/?$/);
@@ -211,6 +433,30 @@ export default {
         return new Response("Forbidden", { status: 403 });
       }
       return stats(env, url);
+    }
+
+    // Проверка бота вручную:
+    //   /bot?key=...           — состояние: последний запуск и последняя ошибка
+    //   /bot?key=...&dry=1     — что бот опубликовал бы прямо сейчас (ничего не отправляет)
+    //   /bot?key=...&run=1     — запустить бота сейчас (публикует, как по расписанию)
+    if (url.pathname === "/bot") {
+      if (!env.STATS_KEY || url.searchParams.get("key") !== env.STATS_KEY) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const json = (o, status = 200) =>
+        new Response(JSON.stringify(o, null, 2), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+      try {
+        if (url.searchParams.get("dry") || url.searchParams.get("run")) {
+          return json(await runBot(env, { dryRun: !url.searchParams.get("run") }));
+        }
+        await ensureBotTables(env.DB);
+        const rows = (await env.DB.prepare("SELECT k, v FROM meta").all()).results;
+        const meta = Object.fromEntries(rows.map((r) => [r.k, JSON.parse(r.v)]));
+        const count = await env.DB.prepare("SELECT COUNT(*) n FROM posted").first();
+        return json({ ...meta, posted_last_7_days: count?.n ?? 0 });
+      } catch (e) {
+        return json({ error: String(e.message || e) }, 500);
+      }
     }
 
     return new Response("Not found", { status: 404 });
