@@ -32,5 +32,9 @@ jobs:
           workingDirectory: tracker
           secrets: |
             STATS_KEY
+            TELEGRAM_BOT_TOKEN
+            TELEGRAM_CHANNEL
         env:
           STATS_KEY: ${{ secrets.STATS_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
